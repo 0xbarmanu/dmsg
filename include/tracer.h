@@ -13,4 +13,8 @@ int findFreeIdx(int i);
 //        client_info - info of client to be checked
 void sendCheckCmd(int s, int idx, client_t client_info);
 
+void sigalrm_handler( int sig );
+
+// Start the timer for every CLOCK_TICK
+int start_timer();
 #endif

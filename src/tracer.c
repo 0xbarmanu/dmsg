@@ -12,21 +12,24 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include "common.h"
 #include "tracer.h"
 
-#define NCLIENT 100
+#define NCLIENT 10
+#define CLOCK_TICK 5 // tick every 5 seconds
  
 char tracer[64];
 char checker[64];
 int  checker_port;
 int  tracer_port;
-client_t clients[NCLIENT]; // 10 clients. Notice that we're not doing any bound checking.
+volatile client_t clients[NCLIENT];
 
 int findFreeIdx(int i)
 {
     int temp = i;
-    while (clients[i].port != 0) {
+    if (i == NCLIENT) i = 0;
+    while (clients[i].state != FREE) {
         i ++;
         if (i == NCLIENT) i = 0;
         if (i == temp) 
@@ -54,16 +57,56 @@ void sendCheckCmd(int s, int idx, client_t client_info)
 
     d_print("Sent CHECK to checker at %s:%d msg.cmd=%d\n", inet_ntoa(si_checker.sin_addr), si_checker.sin_port, msg.cmd);
 
-    // if (sendto(s, &client_info, sizeof(client_info), 0, (struct sockaddr*)(&si_checker), slen)==-1)
-    //     diep("sendto");
+}
+
+void sigalrm_handler( int sig )
+{
+    struct sockaddr_in si_temp;
+    int i;
+    for (i = 0; i < NCLIENT; i++)
+    {
+        if (clients[i].state == CHECKING)
+        {
+            clients[i].tries ++;
+
+            if (clients[i].tries >= 2)
+            {
+                clients[i].state = FREE;
+                clients[i].tries = 0;
+                si_temp.sin_addr.s_addr = clients[i].host;
+                d_print("Timeout for checking client idx %d %s:%d\n", i, inet_ntoa(si_temp.sin_addr), clients[i].port);
+            }
+            else if (clients[i].tries == 1)
+            {
+                // TODO: try to send one more time
+            }
+        }
+    }
+    alarm(CLOCK_TICK);
+}
+
+int start_timer()
+{
+    struct sigaction sact;
+    sigemptyset (&sact.sa_mask);
+    sact.sa_flags = 0;
+    sact.sa_handler = sigalrm_handler;
+    sigaction(SIGALRM, &sact, NULL);
+
+    alarm(CLOCK_TICK);  /* Request SIGALRM in 5 seconds */
+
+    return 0;
 }
 
 int main(void)
 {
     struct sockaddr_in si_me, si_other, si_reply;
-    int s, i, j, slen=sizeof(si_other);
-    msg_t  msg, sendmsg;
-    int idx = 0;
+    int s,  i, j, slen=sizeof(si_other);
+    msg_t   msg, sendmsg;
+    int     idx = -1;
+    fd_set  read_flags;
+    struct timeval waitd;          // the max wait time for an event
+    int     sel;
  
   
     if (readTracerInfo(tracer, &tracer_port, checker, &checker_port) != OK)
@@ -89,43 +132,68 @@ int main(void)
     if (bind(s, (struct sockaddr*)(&si_me), sizeof(si_me))==-1)
         diep("bind");
 
+    start_timer();
 
     while (1)
     {
         // When a new client sends a datagram...
-        memset((char*) &msg, 0, sizeof(msg));
-        if (recvfrom(s, &msg, sizeof(msg), 0, (struct sockaddr*)(&si_other), (socklen_t*)&slen)==-1)
-            diep("recvfrom");
+        while(1) {
+            waitd.tv_sec  = 10;
+            waitd.tv_usec = 0;
+            FD_ZERO(&read_flags);
+            FD_SET(s, &read_flags);
+
+            sel = select(s+1, &read_flags, NULL, (fd_set*)0, &waitd);
+            if(sel < 0)
+                continue;
+
+            //socket ready for reading
+            if(FD_ISSET(s, &read_flags)) {
+                FD_CLR(s, &read_flags);
+            
+                memset((char*) &msg, 0, sizeof(msg));
+                if (recvfrom(s, &msg, sizeof(msg), 0, (struct sockaddr*)(&si_other), (socklen_t*)&slen)==-1)
+                    diep("recvfrom");
+            
+                break;
+            }
+        }
 
         d_print("Received packet from %s:%d msg.command=%d\n", inet_ntoa(si_other.sin_addr), si_other.sin_port, msg.cmd);
         
         switch (msg.cmd) {
             case HELLO_PUNCHING:
-                msg.cmd = ACK_HELLO;
-                si_reply.sin_family = AF_INET;
-                si_reply.sin_port = si_other.sin_port;
-                si_reply.sin_addr.s_addr = si_other.sin_addr.s_addr;
-                if (sendto(s, &msg, sizeof(msg), 0, (struct sockaddr*)(&si_reply), slen)==-1)
-                    diep("sendto");
-
-                d_print("Send ACK_HELLO packet to %s:%d msg.command=%d\n", 
-                        inet_ntoa(si_reply.sin_addr), si_reply.sin_port, msg.cmd);
-
-                idx = findFreeIdx(idx);
+                // Find a free space to store new client
+                idx = findFreeIdx(idx+1);
                 if (idx == -1)
                     diep("No more space for new client");
 
+                // store new client info
                 clients[idx].host = si_other.sin_addr.s_addr;
                 clients[idx].port = si_other.sin_port;
 
                 sendCheckCmd(s, idx, clients[idx]);
+                clients[idx].state = CHECKING;
 
-                idx++;
+                // reply ACK_HELLO to the new client
+                msg.cmd = ACK_HELLO;
+                if (sendto(s, &msg, sizeof(msg), 0, (struct sockaddr*)(&si_other), slen)==-1)
+                    diep("sendto");
+
+                d_print("Send ACK_HELLO packet to %s:%d msg.command=%d\n", 
+                        inet_ntoa(si_other.sin_addr), si_other.sin_port, msg.cmd);
 
             break;
 
             case CHECK_OK:
-                si_other.sin_addr.s_addr = msg.client_info.host;
+                if (clients[msg.idx].state == CHECKING)
+                {
+                    clients[msg.idx].state = VERIFIED;
+                    si_other.sin_addr.s_addr = msg.client_info.host;
+                }
+                else{
+                    d_print("Client state error %d, expected state %d", clients[msg.idx].state, CHECKING);
+                }
                 d_print("Received CHECK_OK for client %s:%d idx=%d\n", inet_ntoa(si_other.sin_addr), msg.client_info.port, msg.idx);
             break;
 

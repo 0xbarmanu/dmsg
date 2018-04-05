@@ -9,6 +9,7 @@
 
 // A small struct to hold a UDP endpoint. 
 // Use this to hold each client's endpoint.
+#include <stdbool.h>
 
 extern char* config_file;
 extern char tracer[64];
@@ -16,12 +17,11 @@ extern char checker[64];
 extern int  checker_port;
 extern int  tracer_port;
 
-typedef struct client
-{
-    int host;
-    short port; 
-    // location
-} client_t;
+typedef enum state {
+        FREE      = 0, 
+        VERIFIED  = 1,
+        CHECKING  = 2
+} state_e;
 
 typedef enum command {
         HELLO_PUNCHING  = 0, 
@@ -32,11 +32,22 @@ typedef enum command {
         LOCATION
 } command_e;
 
+typedef struct client
+{
+    int         host;
+    int         port; 
+    state_e     state; 
+    short       tries;
+    // location
+} client_t;
+
 typedef struct msg {
         command_e       cmd;
         int             idx; // index of client in the database
         client_t        client_info;
 } msg_t;
+
+
 
 void init();
 void diep(char *s);
