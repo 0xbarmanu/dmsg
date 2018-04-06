@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "common.h" 
-
+#include "miniupnpc.h"
  
 
 char tracer[64];
@@ -51,9 +51,12 @@ int main(void)
     si_other.sin_port = htons(tracer_port);
     si_other.sin_addr.s_addr = inet_addr(tracer);
    
+    // register Port using UPnP
+    registerPort("10.0.0.1","60008","60008","udp","1800");
+
     msg.cmd = HELLO_PUNCHING;
     if (sendto(s, &msg, sizeof(msg), 0, (struct sockaddr*)(&si_other), slen)==-1)
-                    diep("sendto");
+        diep("sendto");
 
     // si_me.sin_family = AF_INET;
     // si_me.sin_port = htons(CLIENT_PORT);
@@ -77,8 +80,6 @@ int main(void)
                             ntohs(si_other.sin_port), recv_msg.cmd);
 
                 // confirm check ok
-               // msg.cmd = CHECK_OK;
-               // msg.dix = recv_msg.idx;
                 recv_msg.cmd = CHECK_OK;
                 if (sendto(s, &recv_msg, sizeof(recv_msg), 0, (struct sockaddr*)(&si_other), slen)==-1)
                     diep("sendto");
